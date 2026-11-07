@@ -32,3 +32,16 @@ backend/tmp/
 
 # Frontend generated files
 frontend/dist/
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.tfvars
+!*.tfvars.example
+crash.log
+tfplan
+*.pem
+*.key
+ansible/inventory.ini

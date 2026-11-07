@@ -1,0 +1,22 @@
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+# terraform.tfvars is git-ignored: it holds your IPs, so never commit it.
+
+location    = "southafricanorth"
+environment = "dev"
+
+# Your public IP + /32. Find it with: curl -s ifconfig.me
+# Add one line per teammate who needs SSH access.
+allowed_ssh_cidrs = [
+  "YOUR_PUBLIC_IP/32",
+]
+
+# One PUBLIC key per teammate (.pub files only, never the private key).
+ssh_public_key_paths = [
+  "~/.ssh/alu-devops.pub",
+  # "keys/joshua.pub",
+]
+
+# Optional overrides
+# vm_size = "Standard_B2als_v2"
+# tags    = { owner = "team-edushare" }
