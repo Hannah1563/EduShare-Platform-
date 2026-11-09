@@ -9,7 +9,7 @@ app_image_tag: "latest"
 # --- Where the app lives on the server ---
 app_dir: /opt/edushare
 app_public_port: 80          # port opened to the internet (matches the Azure NSG)
-app_container_port: 3000     # port Express listens on inside the container (check Dockerfile EXPOSE)
+app_container_port: 4000     # port Express listens on inside the container (Dockerfile EXPOSE 4000)
 app_health_path: /health
 
 # --- MongoDB ---
