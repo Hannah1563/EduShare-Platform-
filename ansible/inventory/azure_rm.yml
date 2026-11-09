@@ -1,0 +1,18 @@
+---
+# Dynamic Azure inventory: finds the EduShare VM by its resource group and tags,
+# so the IP never has to be copied by hand.
+# Needs: ansible-galaxy collection install azure.azcollection
+#        pip install -r ~/.ansible/collections/ansible_collections/azure/azcollection/requirements.txt
+#        az login   (and ARM_SUBSCRIPTION_ID exported)
+# Test:  ansible-inventory -i inventory/azure_rm.yml --graph
+plugin: azure.azcollection.azure_rm
+auth_source: cli
+include_vm_resource_groups:
+  - "{{ lookup('env', 'EDUSHARE_RESOURCE_GROUP') | default('edushare-rg', true) }}"
+plain_host_names: true
+conditional_groups:
+  # Every VM in the resource group joins the same group the playbook targets
+  edushare: true
+hostvar_expressions:
+  ansible_host: public_ipv4_address | first
+  ansible_user: "'azureuser'"

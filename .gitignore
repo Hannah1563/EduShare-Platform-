@@ -31,4 +31,4 @@ coverage/
 backend/tmp/
 
 # Frontend generated files
-frontend/dist/
+frontend/dist/ansible/group_vars/edushare/vault.yml.decrypted

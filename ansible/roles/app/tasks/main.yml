@@ -1,0 +1,50 @@
+---
+- name: Create the app folder
+  ansible.builtin.file:
+    path: "{{ app_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Write the environment file (secrets from Ansible Vault)
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ app_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart the app stack
+
+- name: Write the docker compose file
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ app_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0640"
+
+- name: Log in to Docker Hub (only when the image is private)
+  community.docker.docker_login:
+    username: "{{ dockerhub_username }}"
+    password: "{{ dockerhub_token }}"
+  no_log: true
+  when: dockerhub_username | length > 0
+
+- name: Pull the images and start app + MongoDB
+  community.docker.docker_compose_v2:
+    project_src: "{{ app_dir }}"
+    pull: always
+    state: present
+    wait: true
+    wait_timeout: 180
+
+- name: Check the app answers on its health endpoint
+  ansible.builtin.uri:
+    url: "http://localhost:{{ app_public_port }}{{ app_health_path }}"
+    status_code: 200
+  register: app_health
+  retries: 10
+  delay: 6
+  until: app_health.status == 200

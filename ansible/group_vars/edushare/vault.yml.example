@@ -1,0 +1,9 @@
+---
+# Copy to vault.yml, fill in real values, then encrypt:
+#   cp group_vars/edushare/vault.yml.example group_vars/edushare/vault.yml
+#   ansible-vault encrypt group_vars/edushare/vault.yml
+# Only the encrypted vault.yml may be committed.
+vault_mongo_root_password: "change-me-to-a-long-random-password"
+# Only needed if the Docker Hub image is private:
+vault_dockerhub_username: ""
+vault_dockerhub_token: ""

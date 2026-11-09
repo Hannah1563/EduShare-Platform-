@@ -1,0 +1,8 @@
+---
+# Install with: ansible-galaxy collection install -r requirements.yml
+collections:
+  - name: community.docker
+  - name: community.general
+  - name: ansible.posix
+  # Only needed for the dynamic Azure inventory (inventory/azure_rm.yml)
+  - name: azure.azcollection
