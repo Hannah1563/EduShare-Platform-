@@ -1,0 +1,122 @@
+name: Security
+
+# Runs on every pull request into main, and again after a merge to main.
+# A merge to main also publishes the image to Docker Hub, but only if every scan passed.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Least privilege: the jobs only read the repo (gitleaks also reads the PR's commit list).
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # 1. Secret scanning: fails if a password, token or key was ever committed.
+  secrets:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # scan every commit, not just the latest one
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 2. Dependency scanning: fails on high/critical vulnerabilities in packages
+  #    that end up in the running app.
+  dependencies:
+    name: Dependency scan (npm audit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # --omit=dev: the image installs backend packages with --omit=dev, so
+      # dev tools (jest, eslint, nodemon) never reach production.
+      - name: Audit backend
+        working-directory: backend
+        run: npm audit --omit=dev --audit-level=high
+
+      # The frontend is compiled to static files at build time, so only its
+      # runtime packages (react, react-dom, ...) matter here.
+      - name: Audit frontend
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
+
+  # 3. Container scanning: builds the real image and fails on fixable
+  #    high/critical vulnerabilities in the OS packages or node_modules inside it.
+  image:
+    name: Image scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true # keep the image in the local Docker so Trivy can scan it
+          push: false
+          tags: edushare:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Trivy runs from its official image, pinned to a fixed version.
+      # The vulnerability database is still downloaded fresh on every run.
+      - name: Scan image with Trivy
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.58.1 image \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            edushare:scan
+
+  # 4. Publish: only after a merge to main, and only if all three scans passed.
+  push:
+    name: Push image to Docker Hub
+    runs-on: ubuntu-latest
+    needs: [secrets, dependencies, image]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Two tags: "latest" for convenience, and the commit SHA so every
+      # published image can be traced back to the exact code it was built from.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/edushare:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/edushare:${{ github.sha }}
+          cache-from: type=gha
