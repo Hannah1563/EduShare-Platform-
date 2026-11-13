@@ -33,8 +33,15 @@ WORKDIR /app/backend
 # Copy backend manifests first for layer caching
 COPY --chown=node:node backend/package.json backend/package-lock.json ./
 
-# Install production dependencies only (no jest, supertest, nodemon, eslint)
-RUN npm ci --omit=dev
+# Install production dependencies only (no jest, supertest, nodemon, eslint).
+# Then remove npm, npx, corepack and yarn: the container only runs "node server.js",
+# and the npm tool bundled in the base image carries its own vulnerable packages
+# (pacote, sigstore, brace-expansion, ...) that Trivy flags. Less tooling = smaller attack surface.
+RUN npm ci --omit=dev \
+ && npm cache clean --force \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+           /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+           /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
 # Copy the backend source
 COPY --chown=node:node backend/ ./
