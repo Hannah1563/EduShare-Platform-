@@ -36,13 +36,20 @@ Planned next (see the project board): keyword search in the UI ([#8](https://git
 | Backend | Node.js, Express |
 | Database | MongoDB (Mongoose) |
 | Testing | Jest, Supertest, mongodb-memory-server |
-| DevOps | Docker, Docker Compose, GitHub Actions |
+| DevOps | Docker, Docker Compose, GitHub Actions, Docker Hub |
+| Infrastructure as Code | Terraform (Azure), Ansible |
+| Security scanning | Gitleaks, npm audit, Trivy, Checkov |
 
 ## Project Structure
 
 ```
 EduShare-Platform-/
-├── .github/workflows/ci.yml   # CI pipeline (lint, test, build, Docker)
+├── .github/workflows/
+│   ├── ci.yml                 # CI pipeline (lint, test, build, Docker)
+│   └── security.yml           # Security scans + Docker Hub push (F3)
+├── terraform/                 # Azure infrastructure: network, firewall, VM (F3)
+├── ansible/                   # Server configuration and app deployment (F3)
+├── docs/security/             # Security scan evidence screenshots
 ├── backend/                   # Express API, MongoDB models, tests
 │   ├── .env.example           # Environment variable template (running without Docker)
 │   └── tests/                 # API tests (Jest + Supertest)
@@ -56,6 +63,7 @@ EduShare-Platform-/
 ├── .env.example               # Environment variable template for Docker Compose
 ├── Dockerfile                 # Multi-stage build: frontend build, then backend runtime
 ├── docker-compose.yml         # App + MongoDB services
+├── SECURITY.md                # Scan findings and how they were handled
 └── README.md
 ```
 
@@ -194,8 +202,9 @@ The GitHub Actions workflow ([`ci.yml`](.github/workflows/ci.yml)) runs on every
 
 Pushes directly to `main` do not trigger the workflow, because all code reaches `main` through pull requests that have already passed CI.
 
-## CI/CD Evidence
+## CI/CD Evidence (These runs are in the original repository, [maridadithierry/EduShare-Platform-](https://github.com/maridadithierry/EduShare-Platform-), where Formative 2 was completed.)
 
+ 
 **Successful workflow runs**
 
 - CI #1: commit `dada099` (Add CI workflow for lint, test, and Docker build): [run](https://github.com/maridadithierry/EduShare-Platform-/actions/runs/40936787541), jobs: [Backend (lint and test)](https://github.com/maridadithierry/EduShare-Platform-/actions/runs/40936787541/job/123669325520), [Frontend (lint and build)](https://github.com/maridadithierry/EduShare-Platform-/actions/runs/40936787541/job/123669325127), [Docker build](https://github.com/maridadithierry/EduShare-Platform-/actions/runs/40936787541/job/123669587165)
@@ -215,6 +224,31 @@ To prove the pipeline catches mistakes, [PR #28](https://github.com/maridadithie
 
 Full run history: [Actions → CI](https://github.com/maridadithierry/EduShare-Platform-/actions/workflows/ci.yml)
 
+## Infrastructure and Deployment (Formative 3)
+
+EduShare goes from nothing to live on Azure in two commands:
+
+1. **Terraform** ([`terraform/`](terraform/README.md)) creates a resource group, virtual network, subnet, network security group (SSH from the team's IPs only, HTTP public, everything else denied) and one Ubuntu 24.04 VM with a static public IP, in South Africa North.
+   ```bash
+   cd terraform && terraform init && terraform apply
+   ```
+2. **Ansible** ([`ansible/`](ansible/README.md)) installs Docker, hardens the server (UFW, SSH hardening, fail2ban, automatic security updates) and runs the app with MongoDB using the image from Docker Hub.
+   ```bash
+   cd ansible && ansible-playbook playbook.yml --ask-vault-pass
+   ```
+
+Live site: http://20.164.222.7 (while the VM is running).
+
+## Security Scanning (DevSecOps)
+
+The [Security workflow](.github/workflows/security.yml) runs on every pull request into `main`:
+
+1. **Secret scan (Gitleaks)** over the full Git history
+2. **Dependency scan (npm audit)** of backend and frontend runtime packages, failing on HIGH or CRITICAL3. **Image scan (Trivy)** of the built Docker image, failing on fixable HIGH or CRITICAL issues
+4. **Push to Docker Hub** (`iannah/edushare`) after a merge into `main`, only if all scans passed
+
+Findings and how each was fixed or accepted are documented in [SECURITY.md](SECURITY.md).
+
 ## Branch Protection
 
 The `main` branch is protected:
@@ -229,12 +263,14 @@ The `main` branch is protected:
 
 ## Team
 
-| Member | Role for F1 | Role for F2 |
-|--------|-------------|-------------|
-| Maridadi Thierry | Team Lead, Backend: API Routes and Application Logic | CI Pipeline and Branch Protection |
-| Hannah Tuyishimire | Frontend: Features and API Integration | App Preparation for Docker/CI, Documentation and Evidence |
-| Ange Umutoni | Frontend: UI/Design and Layout | Docker Compose |
-| Joshua Mugisha | Backend: Data Management and API Testing | Dockerfile |
+| Member | Role for F1 | Role for F2 | Role for F3 |
+|--------|-------------|-------------|-------------|
+| Maridadi Thierry | Team Lead, Backend: API Routes and Application Logic | CI Pipeline and Branch Protection | Assigned CI security scans |
+| Hannah Tuyishimire | Frontend: Features and API Integration | App Preparation for Docker/CI, Documentation and Evidence | Terraform (Part 1) |
+| Ange Umutoni | Frontend: UI/Design and Layout | Docker Compose | Ansible configuration and deployment (Part 2) |
+| Joshua Mugisha | Backend: Data Management and API Testing | Dockerfile | SECURITY.md and README.md|
+
+> **Repository note:** from Formative 3 the team works in this repository, a fork of [maridadithierry/EduShare-Platform-](https://github.com/maridadithierry/EduShare-Platform-) with the full F1 and F2 history. The original owner's GitHub account was locked for a billing issue, which stopped GitHub Actions from running there.
 
 Project board: [GitHub Projects](https://github.com/users/maridadithierry/projects/15)
 
@@ -248,6 +284,28 @@ Project board: [GitHub Projects](https://github.com/users/maridadithierry/projec
 
 Never commit `node_modules/` or `.env` files.
 
+## AI Use Annex
+
+
+We used Claude (Anthropic) as an assistant during F3. Every change was reviewed, run and tested by us before it was committed.
+
+
+| Area | How AI was used |
+|------|-----------------|
+| Terraform | Helped draft the module structure. We ran plan and apply ourselves, chose the region and VM size after hitting Azure SKU restrictions, and added the team's SSH keys and IPs |
+| Troubleshooting | Explained errors we hit (Azure SkuNotAvailable, provider timeouts, a stale TF_WORKSPACE, GitHub Actions blocked by a billing lock) and how to fix them |
+| Security review | Pointed out values to keep out of Git and screenshots (subscription ID, terraform.tfvars, state files) |
+
+
+| What we did ourselves |
+|-----------------------|
+| Ran all commands, deployed to Azure and checked the results (SSH login, portal, CI runs) |
+| Made the decisions: team roles, accepted risks (CKV_AZURE_119), moving CI to a fork when the original repo's Actions were locked |
+| Took and checked all evidence screenshots |
+| Wrote and made all commits ourselves |
+
 ## License
 
-This project is licensed under the terms in the [LICENSE](LICENSE) file.
+This project is licensed under the terms
+
+in the [LICENSE](LICENSE) file.
