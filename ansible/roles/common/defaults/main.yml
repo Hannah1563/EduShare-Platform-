@@ -1,0 +1,9 @@
+---
+common_timezone: Africa/Kigali
+common_packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - python3-pip
+  - unattended-upgrades
+  - apt-listchanges

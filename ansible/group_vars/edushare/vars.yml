@@ -1,0 +1,31 @@
+---
+# Values shared by every host in the "edushare" group.
+# Secrets live in vault.yml (encrypted with ansible-vault), never here.
+
+# --- App image (pulled from Docker Hub, never built on the server) ---
+app_image: "iannah/edushare"
+app_image_tag: "latest"
+
+# --- Where the app lives on the server ---
+app_dir: /opt/edushare
+app_public_port: 80          # port opened to the internet (matches the Azure NSG)
+app_container_port: 4000     # port Express listens on inside the container (Dockerfile EXPOSE 4000)
+app_health_path: /health
+
+# --- MongoDB ---
+mongo_image: "mongo:7.0"
+mongo_db_name: edushare
+mongo_root_username: edushare_admin
+mongo_root_password: "{{ vault_mongo_root_password }}"
+
+# --- Optional Docker Hub login (only needed if the image is private) ---
+dockerhub_username: "{{ vault_dockerhub_username | default('') }}"
+dockerhub_token: "{{ vault_dockerhub_token | default('') }}"
+
+# --- Security ---
+ssh_port: 22
+# Leave empty to allow SSH from anywhere at the OS firewall level
+# (the Azure NSG already limits SSH to the team's IPs).
+ssh_allowed_cidrs: []
+fail2ban_maxretry: 5
+fail2ban_bantime: 3600

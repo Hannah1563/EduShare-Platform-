@@ -1,0 +1,18 @@
+---
+# Configures the EduShare VM created by Terraform:
+#   common   -> base packages, timezone, automatic security updates
+#   docker   -> Docker Engine + Compose plugin from Docker's official repo
+#   security -> UFW firewall, SSH hardening, fail2ban
+#   app      -> pulls the app image and runs it with MongoDB via docker compose
+#
+# Run everything:        ansible-playbook playbook.yml --ask-vault-pass
+# Skip the app:          ansible-playbook playbook.yml --ask-vault-pass --skip-tags app
+# Only redeploy the app: ansible-playbook playbook.yml --ask-vault-pass --tags app
+- name: Configure and deploy EduShare
+  hosts: edushare
+  become: true
+  roles:
+    - { role: common, tags: [common] }
+    - { role: docker, tags: [docker] }
+    - { role: security, tags: [security] }
+    - { role: app, tags: [app] }
