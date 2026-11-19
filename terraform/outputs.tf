@@ -60,7 +60,7 @@ output "ssh_bastion_command" {
 
 output "ssh_app_command" {
   description = "Log in to the private app VM by jumping through the bastion."
-  value       = "ssh -i ~/.ssh/alu-devops -J ${var.admin_username}@${module.bastion.public_ip} ${var.admin_username}@${module.app.private_ip}"
+  value       = "ssh -i ~/.ssh/alu-devops -o ProxyCommand=\"ssh -i ~/.ssh/alu-devops -W %h:%p ${var.admin_username}@${module.bastion.public_ip}\" ${var.admin_username}@${module.app.private_ip}"
 }
 
 output "app_url" {
