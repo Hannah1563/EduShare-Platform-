@@ -1,121 +1,105 @@
-# Ansible: configure and deploy EduShare
+# Ansible: configure the Summative servers and deploy EduShare
 
-This playbook turns the empty Ubuntu VM that Terraform creates (see `../terraform`) into a running EduShare server. One command installs Docker, hardens the server and starts the app with MongoDB.
+This playbook configures the two VMs that Terraform creates (see `../terraform`) and deploys the app. The CD pipeline runs it on every merge to `main`, with the exact image it just built.
 
-## What the playbook does
+## What runs where
+
+| Host | Reached how | Roles | Result |
+|------|-------------|-------|--------|
+| `edushare-bastion` (`102.37.10.231`, public subnet) | Directly over SSH | `common`, `security`, `proxy` | Nginx reverse proxy on port 80; UFW allows only 22 (rate-limited) and 80 |
+| `edushare-app` (`10.20.2.4`, private subnet, no public IP) | SSH **through the bastion** (`ProxyCommand`) | `common`, `docker`, `security`, `app` | App container pulled from ACR, connected to Cosmos DB; UFW allows 22 and 4000 from the bastion subnet only |
+
+A final step checks `http://localhost/health` on the bastion, which proves the whole path works: Nginx → private VM → app → database.
+
+```
+Internet ──80──▶ bastion: Nginx ──4000──▶ app VM: EduShare container ──▶ Cosmos DB
+                     ▲                         ▲
+Ansible / CD ──22────┘────────22 (jump)────────┘           image pulled from ACR
+```
+
+## Roles
 
 | Role | What it does |
 |------|--------------|
-| `common` | Updates packages, installs base tools, sets the timezone, turns on automatic security updates |
-| `docker` | Installs Docker Engine and the Compose plugin from Docker's official repository |
-| `security` | UFW firewall (deny all incoming except SSH and HTTP), SSH hardening (no root login, no passwords, keys only), fail2ban for repeated SSH failures |
-| `app` | Writes the compose and `.env` files, pulls the app image from Docker Hub, starts app + MongoDB, checks `/health` |
+| `common` | Package updates, base tools, timezone, automatic daily security updates |
+| `docker` | Docker Engine + Compose plugin from Docker's signed repository (app VM only) |
+| `security` | UFW with per-host rules (`group_vars/bastion.yml`, `group_vars/app.yml`), SSH hardening (no root, no passwords, keys only, validated with `sshd -t`), fail2ban |
+| `proxy` | Nginx reverse proxy to the app VM, default site removed, server version hidden, security headers, config checked with `nginx -t` |
+| `app` | Logs in to ACR, writes `compose.yaml` and a `0600` `.env`, pulls and starts the container, waits for `/health`; on failure prints `docker compose ps` and logs; prunes old images |
 
-The server **pulls** the image; it never builds it. MongoDB has no published port, so only the app container can reach it.
-
-## Folder layout
+## Layout
 
 ```
 ansible/
-├── ansible.cfg                  # default inventory, SSH user and key
-├── requirements.yml             # Ansible collections to install
-├── playbook.yml                 # runs the four roles in order
-├── inventory/
-│   ├── hosts.ini                # static inventory (VM IP from Terraform)
-│   └── azure_rm.yml             # dynamic Azure inventory
-├── group_vars/edushare/
-│   ├── vars.yml                 # image, ports, paths, security settings
-│   ├── vault.yml.example        # template for secrets
-│   └── vault.yml                # encrypted secrets (ansible-vault)
-└── roles/
-    ├── common/
-    ├── docker/
-    ├── security/
-    └── app/
+├── ansible.cfg
+├── playbook.yml              three plays: bastion, app VM, end-to-end check
+├── requirements.yml          collections to install
+├── inventory/hosts.ini       bastion + app groups (IPs from Terraform outputs)
+├── group_vars/
+│   ├── all/vars.yml          image, registry, ports, IPs, SSH key
+│   ├── all/vault.yml         ENCRYPTED: Cosmos DB connection string, ACR password
+│   ├── all/vault.yml.example template for vault.yml
+│   ├── bastion.yml           bastion firewall rules
+│   └── app.yml               jump-through-bastion SSH settings + app firewall rules
+└── roles/  common  docker  security  proxy  app
 ```
 
-## Prerequisites
+## Run it
 
-- Ansible 2.15+ on your machine: `pip install ansible` (or `brew install ansible` on macOS)
-- The VM created with Terraform, with **your SSH public key** on it
-- Your private key at `~/.ssh/alu-devops` (change `private_key_file` in `ansible.cfg` if yours is elsewhere)
-- The app image pushed to Docker Hub (`iannah/edushare:latest` by default, see `vars.yml`)
-
-## How to run it
-
-All commands run from the `ansible/` folder.
-
-**1. Install the collections**
+From this folder:
 
 ```bash
+# 1. Collections
 ansible-galaxy collection install -r requirements.yml
-```
 
-**2. Point the inventory at the VM**
+# 2. Secrets (once): copy the template, paste the two Terraform outputs, encrypt
+cp group_vars/all/vault.yml.example group_vars/all/vault.yml
+(cd ../terraform && terraform output -raw mongodb_connection_string; echo)
+(cd ../terraform && terraform output -raw acr_admin_password; echo)
+ansible-vault encrypt group_vars/all/vault.yml
 
-Get the IP and username from Terraform:
-
-```bash
-cd ../terraform && terraform output && cd ../ansible
-```
-
-Put the IP in `inventory/hosts.ini` in place of `REPLACE_WITH_VM_PUBLIC_IP`, and make sure `ansible_user` matches `admin_username`.
-
-**3. Create the secrets file**
-
-```bash
-cp group_vars/edushare/vault.yml.example group_vars/edushare/vault.yml
-# edit vault.yml and set a long random MongoDB password
-ansible-vault encrypt group_vars/edushare/vault.yml
-```
-
-Share the vault password with teammates privately, never in the repo.
-
-**4. Check the connection**
-
-```bash
+# 3. Check Ansible can reach both VMs (the app VM through the bastion)
 ansible edushare -m ping
-```
 
-**5. Run the playbook**
-
-```bash
+# 4. Configure everything and deploy
 ansible-playbook playbook.yml --ask-vault-pass
 ```
 
-Preview without changing anything: add `--check --diff`.
-
-**6. Open the app**
-
-`http://<vm_public_ip>` in a browser, or `curl http://<vm_public_ip>/health`.
-
-## Using the dynamic Azure inventory instead
-
-The dynamic inventory finds the VM by its resource group, so the IP never needs copying.
+Other useful runs:
 
 ```bash
-pip install -r ~/.ansible/collections/ansible_collections/azure/azcollection/requirements.txt
-az login
-export EDUSHARE_RESOURCE_GROUP=<resource group from terraform output>
-ansible-inventory -i inventory/azure_rm.yml --graph
-ansible-playbook -i inventory/azure_rm.yml playbook.yml --ask-vault-pass
+ansible-playbook playbook.yml --ask-vault-pass --check --diff          # dry run
+ansible-playbook playbook.yml --ask-vault-pass --tags app,verify       # redeploy only
+ansible-playbook playbook.yml --ask-vault-pass -e app_image_tag=<sha>  # deploy one exact build
 ```
 
-## Security measures
+Your SSH key defaults to `~/.ssh/alu-devops`. Use another with `export EDUSHARE_SSH_KEY=/path/to/key`. The CD pipeline uses this to point at its deploy key.
 
-- **Firewall:** UFW denies all incoming traffic except SSH (22, rate-limited) and HTTP (80). The Azure NSG adds a second layer and limits SSH to the team's IPs.
-- **SSH:** root login and password logins are disabled; only key-based logins for the admin user are accepted. The config is checked with `sshd -t` before it is applied, so a mistake cannot lock everyone out.
-- **fail2ban:** bans an IP for 1 hour after 5 failed SSH logins within 10 minutes.
-- **Automatic security updates** through `unattended-upgrades`.
-- **Secrets:** the MongoDB password is stored only in the encrypted `vault.yml`. On the server it is written to `/opt/edushare/.env` with `0600` permissions, and the tasks that handle it use `no_log`.
-- **Database isolation:** MongoDB has no published port and is reachable only on the private Docker network.
+## How the CD pipeline uses it
 
-## Useful commands on the server
+The pipeline writes the deploy key and the vault password from GitHub secrets, opens SSH on the bastion for the runner's IP, then runs:
 
 ```bash
-ssh -i ~/.ssh/alu-devops azureuser@<vm_public_ip>
-cd /opt/edushare && sudo docker compose ps        # container status
-sudo docker compose logs -f app                   # app logs
-sudo ufw status verbose                           # firewall rules
-sudo fail2ban-client status sshd                  # banned IPs
+EDUSHARE_SSH_KEY=~/.ssh/deploy_key \
+ansible-playbook playbook.yml --vault-password-file <file> -e app_image_tag=${GITHUB_SHA}
 ```
+
+Because the tag is the commit SHA, every deploy is traceable to one commit and can be rolled back by redeploying an older SHA.
+
+## Security notes
+
+- **No public IP on the app VM**: it is reachable only through the bastion, on SSH and the app port.
+- **Defence in depth**: Azure NSGs (Terraform) and UFW (Ansible) both restrict traffic. Docker-published ports bypass UFW, so for port 4000 the NSG is the enforcing layer; it allows only the bastion subnet.
+- **Secrets**: only in the encrypted `vault.yml`; on the server in `/opt/edushare/.env` (`0600`, root only); tasks that handle them use `no_log`.
+- **Container**: runs as the non-root `node` user with all Linux capabilities dropped and `no-new-privileges`.
+- **Idempotent**: a second run changes nothing; services restart only through handlers when their config changed.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `UNREACHABLE` / timeout on the bastion | Your IP is not in Terraform's `allowed_ssh_cidrs`: add it and `terraform apply` |
+| `UNREACHABLE` on the app VM only | Check the bastion works first; then `ssh-keygen -R 10.20.2.4` if the VM was rebuilt |
+| `Attempting to decrypt but no vault secrets found` | Add `--ask-vault-pass` |
+| `pull access denied` / `manifest unknown` | The image or tag is not in ACR yet: push it (CD pipeline or manual push) |
+| Health check fails | Read the logs the rescue step prints; on the VM: `cd /opt/edushare && sudo docker compose logs` |

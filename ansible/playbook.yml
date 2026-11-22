@@ -1,18 +1,46 @@
 ---
-# Configures the EduShare VM created by Terraform:
-#   common   -> base packages, timezone, automatic security updates
-#   docker   -> Docker Engine + Compose plugin from Docker's official repo
-#   security -> UFW firewall, SSH hardening, fail2ban
-#   app      -> pulls the app image and runs it with MongoDB via docker compose
+# Configures the Summative environment created by Terraform and deploys EduShare.
 #
-# Run everything:        ansible-playbook playbook.yml --ask-vault-pass
-# Skip the app:          ansible-playbook playbook.yml --ask-vault-pass --skip-tags app
-# Only redeploy the app: ansible-playbook playbook.yml --ask-vault-pass --tags app
-- name: Configure and deploy EduShare
-  hosts: edushare
+#   bastion (public IP)  -> common, security, proxy (Nginx reverse proxy)
+#   app VM  (private)    -> common, docker, security, app (pull from ACR, run container)
+#   last                 -> check the live website end to end through the bastion
+#
+# Run everything:           ansible-playbook playbook.yml --ask-vault-pass
+# Only redeploy the app:    ansible-playbook playbook.yml --ask-vault-pass --tags app,verify
+# Deploy one exact image:   ... -e app_image_tag=<commit SHA>   (used by the CD pipeline)
+
+- name: Configure the bastion (SSH entry point and web proxy)
+  hosts: bastion
+  become: true
+  roles:
+    - { role: common, tags: [common] }
+    - { role: security, tags: [security] }
+    - { role: proxy, tags: [proxy] }
+
+- name: Configure the app VM and deploy EduShare
+  hosts: app
   become: true
   roles:
     - { role: common, tags: [common] }
     - { role: docker, tags: [docker] }
     - { role: security, tags: [security] }
     - { role: app, tags: [app] }
+
+- name: Check the live website through the bastion
+  hosts: bastion
+  gather_facts: false
+  tags: [verify]
+  tasks:
+    - name: Request the health endpoint through Nginx
+      # checkov:skip=CKV2_ANSIBLE_1: plain HTTP to localhost on the bastion itself
+      ansible.builtin.uri:
+        url: "http://localhost{{ app_health_path }}"
+        status_code: 200
+      register: site_health
+      retries: 6
+      delay: 5
+      until: site_health.status == 200
+
+    - name: Show the live URL
+      ansible.builtin.debug:
+        msg: "EduShare is live at http://{{ bastion_public_ip }}"

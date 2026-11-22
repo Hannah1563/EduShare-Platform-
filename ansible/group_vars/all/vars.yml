@@ -1,0 +1,32 @@
+---
+# Settings shared by both VMs. Secrets live in vault.yml (encrypted), never here.
+
+ansible_user: azureuser
+
+# SSH key used to log in. Locally this is your own key; the CD pipeline sets
+# EDUSHARE_SSH_KEY to the path of the deploy key it writes from a GitHub secret.
+ansible_ssh_private_key_file: "{{ lookup('ansible.builtin.env', 'EDUSHARE_SSH_KEY') | default('~/.ssh/alu-devops', true) }}"
+
+# --- Network (Terraform outputs) ---
+bastion_public_ip: 102.37.10.231
+app_private_ip: 10.20.2.4
+public_subnet_cidr: 10.20.1.0/24     # where the bastion lives
+
+# --- App image in the private registry (Terraform: acr_login_server) ---
+acr_login_server: edushareacrgvv9o.azurecr.io
+acr_username: edushareacrgvv9o
+acr_password: "{{ vault_acr_password }}"
+app_image: "{{ acr_login_server }}/edushare"
+# The CD pipeline deploys one exact build: -e app_image_tag=<commit SHA>
+app_image_tag: latest
+
+# --- App runtime ---
+app_dir: /opt/edushare
+app_container_port: 4000             # Express PORT (Dockerfile EXPOSE 4000)
+app_health_path: /health
+mongodb_uri: "{{ vault_mongodb_uri }}"   # Cosmos DB connection string (Terraform: mongodb_connection_string)
+
+# --- Security ---
+ssh_port: 22
+fail2ban_maxretry: 5
+fail2ban_bantime: 3600
