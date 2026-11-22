@@ -1,0 +1,9 @@
+---
+# Copy to vault.yml, fill in the real values from Terraform, then encrypt:
+#   cp group_vars/all/vault.yml.example group_vars/all/vault.yml
+#   (cd ../terraform && terraform output -raw mongodb_connection_string; echo)
+#   (cd ../terraform && terraform output -raw acr_admin_password; echo)
+#   ansible-vault encrypt group_vars/all/vault.yml
+# Only the encrypted vault.yml may be committed.
+vault_mongodb_uri: "mongodb://...paste the Cosmos DB connection string..."
+vault_acr_password: "paste the ACR admin password"

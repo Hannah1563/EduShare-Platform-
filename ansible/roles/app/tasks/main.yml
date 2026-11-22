@@ -1,4 +1,8 @@
 ---
+# Deploys the EduShare container on the private app VM:
+# pull the image from the private registry (ACR) and run it with Docker Compose.
+# The database is the managed Cosmos DB, so no database container runs here.
+
 - name: Create the app folder
   ansible.builtin.file:
     path: "{{ app_dir }}"
@@ -17,35 +21,71 @@
   no_log: true
   notify: Restart the app stack
 
-- name: Write the docker compose file
+- name: Write the Docker Compose file
   ansible.builtin.template:
-    src: docker-compose.yml.j2
-    dest: "{{ app_dir }}/docker-compose.yml"
+    src: compose.yaml.j2
+    dest: "{{ app_dir }}/compose.yaml"
     owner: root
     group: root
     mode: "0640"
 
-- name: Log in to Docker Hub (only when the image is private)
+- name: Log in to the private container registry (ACR)
   community.docker.docker_login:
-    username: "{{ dockerhub_username }}"
-    password: "{{ dockerhub_token }}"
+    registry_url: "{{ acr_login_server }}"
+    username: "{{ acr_username }}"
+    password: "{{ acr_password }}"
   no_log: true
-  when: dockerhub_username | length > 0
 
-- name: Pull the images and start app + MongoDB
-  community.docker.docker_compose_v2:
-    project_src: "{{ app_dir }}"
-    pull: always
-    state: present
-    wait: true
-    wait_timeout: 180
+- name: Deploy the app and check it is healthy
+  block:
+    - name: Pull the image and start (or update) the container
+      community.docker.docker_compose_v2:
+        project_src: "{{ app_dir }}"
+        pull: always
+        state: present
+        remove_orphans: true   # removes the old MongoDB container from F3 if present
+        wait: true
+        wait_timeout: 180
 
-- name: Check the app answers on its health endpoint
-  # checkov:skip=CKV2_ANSIBLE_1: plain HTTP to localhost on the server itself; traffic never leaves the VM
-  ansible.builtin.uri:
-    url: "http://localhost:{{ app_public_port }}{{ app_health_path }}"
-    status_code: 200
-  register: app_health
-  retries: 10
-  delay: 6
-  until: app_health.status == 200
+    - name: Wait until the app answers its health check
+      # checkov:skip=CKV2_ANSIBLE_1: plain HTTP to localhost on the server itself; traffic never leaves the VM
+      ansible.builtin.uri:
+        url: "http://localhost:{{ app_container_port }}{{ app_health_path }}"
+        status_code: 200
+      register: app_health
+      retries: 12
+      delay: 5
+      until: app_health.status == 200
+
+  rescue:
+    # Something failed: print the evidence before failing, so the cause is visible.
+    - name: Collect container status
+      ansible.builtin.command: docker compose ps --all
+      args:
+        chdir: "{{ app_dir }}"
+      register: app_ps
+      changed_when: false
+
+    - name: Collect the last container logs
+      ansible.builtin.command: docker compose logs --tail 40
+      args:
+        chdir: "{{ app_dir }}"
+      register: app_logs
+      changed_when: false
+
+    - name: Fail with the diagnostics
+      ansible.builtin.fail:
+        msg: |
+          Deployment of {{ app_image }}:{{ app_image_tag }} failed.
+          Container status:
+          {{ app_ps.stdout }}
+
+          Recent logs:
+          {{ app_logs.stdout }}
+
+- name: Remove old, unused images to free disk space
+  community.docker.docker_prune:
+    images: true
+    images_filters:
+      dangling: false
+      until: 72h
