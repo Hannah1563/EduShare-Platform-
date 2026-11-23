@@ -61,4 +61,15 @@ resource "azurerm_cosmosdb_mongo_collection" "resources" {
     keys   = ["_id"]
     unique = true
   }
+
+  # Cosmos DB needs a compound index to sort on two fields
+  # (the app sorts by helpfulCount, then _id).
+  index {
+    keys = ["helpfulCount", "_id"]
+  }
+
+  # Supports the subject/level filters on the Resources page.
+  index {
+    keys = ["subject", "level"]
+  }
 }
