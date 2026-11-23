@@ -16,7 +16,7 @@ variable "project" {
 variable "environment" {
   description = "Deployment environment. Becomes part of resource names and tags."
   type        = string
-  default     = "dev"
+  default     = "prod"
 
   validation {
     condition     = contains(["dev", "staging", "prod"], var.environment)
@@ -24,8 +24,13 @@ variable "environment" {
   }
 }
 
+variable "resource_group_name" {
+  description = "Existing resource group to deploy into. Created once by the subscription owner, and the only scope the service principal can manage."
+  type        = string
+}
+
 variable "location" {
-  description = "Azure region to deploy into, e.g. southafricanorth. No default on purpose: you must choose one."
+  description = "Azure region, e.g. southafricanorth. No default on purpose: you must choose one."
   type        = string
 }
 
@@ -42,17 +47,23 @@ variable "tags" {
 variable "vnet_address_space" {
   description = "Address range of the virtual network."
   type        = list(string)
-  default     = ["10.10.0.0/16"]
+  default     = ["10.20.0.0/16"]
 }
 
-variable "subnet_address_prefix" {
-  description = "Address range of the application subnet (must be inside the VNet range)."
+variable "public_subnet_prefix" {
+  description = "Public subnet: holds only the bastion / web entry VM."
   type        = string
-  default     = "10.10.1.0/24"
+  default     = "10.20.1.0/24"
+}
+
+variable "private_subnet_prefix" {
+  description = "Private subnet: holds the application VM. No public IPs here."
+  type        = string
+  default     = "10.20.2.0/24"
 }
 
 variable "allowed_ssh_cidrs" {
-  description = "Public IPs (CIDR) allowed to SSH to the VM, e.g. [\"41.186.205.191/32\"]. Add each teammate's IP."
+  description = "Public IPs (CIDR) allowed to SSH to the bastion, e.g. [\"102.22.168.143/32\"]. One per teammate."
   type        = list(string)
 
   validation {
@@ -67,35 +78,47 @@ variable "allowed_ssh_cidrs" {
 }
 
 variable "app_port" {
-  description = "Public port the website is served on. Ansible maps this to the container's port 4000."
+  description = "Port the app container listens on inside the private VM (Express PORT)."
   type        = number
-  default     = 80
+  default     = 4000
+}
+
+variable "enable_nat_gateway" {
+  description = "Give the private subnet outbound internet (apt, Docker, ACR pulls) through a NAT gateway. If false, Azure's default outbound access is used instead."
+  type        = bool
+  default     = true
 }
 
 # ---------------------------------------------------------------------------
-# Virtual machine
+# Virtual machines
 # ---------------------------------------------------------------------------
 
-variable "vm_size" {
-  description = "Azure VM size. If Azure reports SkuNotAvailable, try another size or region."
+variable "app_vm_size" {
+  description = "Size of the private application VM."
   type        = string
   default     = "Standard_B2als_v2"
 }
 
+variable "bastion_vm_size" {
+  description = "Size of the bastion / web entry VM (the smallest size this subscription allows)."
+  type        = string
+  default     = "Standard_B2ats_v2"
+}
+
 variable "admin_username" {
-  description = "Linux admin user created on the VM (Ansible connects as this user)."
+  description = "Linux admin user on both VMs (Ansible connects as this user)."
   type        = string
   default     = "azureuser"
 }
 
 variable "ssh_public_key_paths" {
-  description = "Paths to SSH PUBLIC keys allowed to log in. One per teammate."
+  description = "Paths to SSH PUBLIC keys allowed to log in. One per teammate, plus the CD pipeline's key."
   type        = list(string)
   default     = ["~/.ssh/alu-devops.pub"]
 }
 
 variable "os_disk_size_gb" {
-  description = "OS disk size in GB (Docker images and MongoDB data live here)."
+  description = "OS disk size in GB for each VM."
   type        = number
   default     = 30
 
@@ -103,4 +126,26 @@ variable "os_disk_size_gb" {
     condition     = var.os_disk_size_gb >= 30 && var.os_disk_size_gb <= 128
     error_message = "os_disk_size_gb must be between 30 and 128."
   }
+}
+
+# ---------------------------------------------------------------------------
+# Managed database (Azure Cosmos DB for MongoDB)
+# ---------------------------------------------------------------------------
+
+variable "db_name" {
+  description = "MongoDB database name the app uses."
+  type        = string
+  default     = "edushare"
+}
+
+variable "cosmos_free_tier" {
+  description = "Use the Cosmos DB free tier (1000 RU/s, 25 GB). Only one free-tier account is allowed per subscription."
+  type        = bool
+  default     = true
+}
+
+variable "cosmos_throughput" {
+  description = "Provisioned throughput (RU/s) for the resources collection. 400 is the minimum and fits in the free tier."
+  type        = number
+  default     = 400
 }

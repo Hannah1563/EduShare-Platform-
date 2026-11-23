@@ -1,5 +1,5 @@
 variable "name_prefix" {
-  description = "Prefix for resource names, e.g. edushare-dev."
+  description = "Prefix for resource names, e.g. edushare-prod."
   type        = string
 }
 
@@ -14,23 +14,33 @@ variable "resource_group_name" {
 }
 
 variable "vnet_address_space" {
-  description = "Address range(s) of the virtual network."
+  description = "Address range of the virtual network."
   type        = list(string)
 }
 
-variable "subnet_address_prefix" {
-  description = "Address range of the application subnet."
+variable "public_subnet_prefix" {
+  description = "Address range of the public (bastion) subnet."
+  type        = string
+}
+
+variable "private_subnet_prefix" {
+  description = "Address range of the private (application) subnet."
   type        = string
 }
 
 variable "allowed_ssh_cidrs" {
-  description = "CIDRs allowed to reach port 22."
+  description = "Public IPs allowed to SSH to the bastion."
   type        = list(string)
 }
 
 variable "app_port" {
-  description = "Public port for the website."
+  description = "Port the app listens on in the private subnet."
   type        = number
+}
+
+variable "enable_nat_gateway" {
+  description = "Create a NAT gateway for the private subnet's outbound traffic."
+  type        = bool
 }
 
 variable "tags" {

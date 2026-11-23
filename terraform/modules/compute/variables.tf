@@ -1,5 +1,5 @@
-variable "name_prefix" {
-  description = "Prefix for resource names, e.g. edushare-dev."
+variable "name" {
+  description = "Full name of the VM, e.g. edushare-prod-app-vm. Other resources reuse it as a prefix."
   type        = string
 }
 
@@ -16,6 +16,12 @@ variable "resource_group_name" {
 variable "subnet_id" {
   description = "Subnet the VM's network interface joins."
   type        = string
+}
+
+variable "assign_public_ip" {
+  description = "Give the VM a static public IP. Only the bastion should have one."
+  type        = bool
+  default     = false
 }
 
 variable "vm_size" {
