@@ -1,0 +1,6 @@
+---
+# Bastion firewall (UFW): SSH from anywhere, rate-limited (the Azure NSG already
+# restricts it to the team's IPs and the CD runner) and the public website.
+firewall_rules:
+  - { port: "{{ ssh_port }}", from: any, rule: limit, comment: "SSH (NSG limits sources)" }
+  - { port: 80, from: any, rule: allow, comment: "Public website (Nginx)" }

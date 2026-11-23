@@ -1,5 +1,7 @@
 name: CI
 
+# Runs on every push to a feature branch, on every pull request into main or
+# summative, and when the CD pipeline calls it before a deploy (workflow_call).
 on:
   push:
     branches-ignore:
@@ -7,6 +9,11 @@ on:
   pull_request:
     branches:
       - main
+      - summative
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   backend:

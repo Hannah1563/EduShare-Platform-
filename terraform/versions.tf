@@ -7,18 +7,25 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.0"
     }
-  }
-}
-
-# The azurerm v4 provider needs a subscription ID. We read it from the
-# ARM_SUBSCRIPTION_ID environment variable instead of hardcoding it:
-#   export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-provider "azurerm" {
-  features {
-    resource_group {
-      # Let `terraform destroy` remove the group even if Azure added
-      # helper resources to it (e.g. NetworkWatcher).
-      prevent_deletion_if_contains_resources = false
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
     }
   }
+
+  # Remote state in Azure Storage, so every teammate and the pipeline see the
+  # same infrastructure. Settings live in backend.hcl:
+  #   terraform init -backend-config=backend.hcl
+  backend "azurerm" {}
+}
+
+# Credentials come from environment variables, never from code:
+#   ARM_CLIENT_ID, ARM_CLIENT_SECRET, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID
+provider "azurerm" {
+  features {}
+
+  # The service principal is Contributor on one resource group only, so it
+  # cannot register resource providers for the whole subscription. The
+  # subscription owner registers them once instead (see README).
+  resource_provider_registrations = "none"
 }

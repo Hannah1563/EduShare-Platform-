@@ -1,166 +1,138 @@
 # EduShare infrastructure (Terraform, Azure)
 
-This folder provisions everything EduShare needs to run on Azure: a virtual network, a firewall (network security group) and one Ubuntu 24.04 VM. Ansible (`../ansible`) then installs Docker on that VM and deploys the app.
+This folder provisions the production environment for EduShare: a private network, a bastion host that is the only public entry point, a private application VM, a managed MongoDB-compatible database and a private container registry. Ansible (`../ansible`) then configures both VMs and deploys the app, and the CD pipeline (`../.github/workflows/cd.yml`) does that automatically on every merge to `main`.
 
-## What gets created
+## Architecture
 
 ```
-Resource group  edushare-dev-rg
-├── Virtual network  edushare-dev-vnet        10.10.0.0/16
-│   └── Subnet       edushare-dev-app-subnet  10.10.1.0/24
-│       └── NSG      edushare-dev-app-nsg
-│             allow 22/tcp  from allowed_ssh_cidrs only
-│             allow 80/tcp  from Internet
-│             deny  everything else (Azure default)
-├── Public IP        edushare-dev-pip         static, Standard SKU
-├── NIC              edushare-dev-nic
-└── VM               edushare-dev-vm          Ubuntu 24.04, SSH keys only
+                         Internet
+                            │
+             80 (website)   │   22 (team IPs + CD runner, temporary)
+                            ▼
+┌──────────────────────── edushare-prod-vnet 10.20.0.0/16 ────────────────────────┐
+│                                                                                 │
+│  public subnet 10.20.1.0/24          private subnet 10.20.2.0/24                │
+│  ┌─────────────────────────┐         ┌────────────────────────────┐             │
+│  │ edushare-prod-bastion-vm│ ──22──▶ │ edushare-prod-app-vm       │             │
+│  │ public IP, Nginx proxy  │ ─4000─▶ │ no public IP, Docker + app │             │
+│  └─────────────────────────┘         └──────┬──────────┬──────────┘             │
+│   NSG: 22 team IPs, 80 internet             │          │   NSG: 22 + 4000 from   │
+│                                             │          │   public subnet only    │
+└─────────────────────────────────────────────┼──────────┼─────────────────────────┘
+                                              │          │
+                          service endpoint    │          │  NAT gateway (outbound only)
+                                              ▼          ▼
+                              Cosmos DB for MongoDB    internet: apt, Docker, ACR pull
+                              (VNet filter: private         │
+                               subnet only)                 ▼
+                                                   Azure Container Registry (private)
 ```
 
-`terraform plan` on an empty subscription shows **8 to add**.
+| Resource | Name | Purpose |
+|----------|------|---------|
+| Virtual network | `edushare-prod-vnet` | Private network, two subnets |
+| Bastion VM | `edushare-prod-bastion-vm` | Only public IP. SSH jump host and Nginx reverse proxy for the website |
+| App VM | `edushare-prod-app-vm` | Runs the app container. Private subnet, no public IP |
+| NSGs | `edushare-prod-public-nsg`, `edushare-prod-private-nsg` | Public: 22 from team IPs, 80 from internet. Private: 22 and 4000 from the bastion subnet only, everything else denied |
+| NAT gateway | `edushare-prod-natgw` | Outbound internet for the private VM, with nothing inbound |
+| Managed database | `edushare-prod-cosmos-<suffix>` | Azure Cosmos DB for MongoDB (free tier), reachable only from the private subnet |
+| Container registry | `edushareacr<suffix>` | Private registry for the app image |
 
 ## Layout
 
 ```
 terraform/
-├── versions.tf               Terraform + provider versions, provider config
+├── versions.tf               Terraform + provider versions, remote state backend
+├── backend.hcl               where the remote state lives (no secrets)
 ├── variables.tf              all inputs, with validation rules
-├── main.tf                   resource group + calls the two modules
-├── outputs.tf                IPs, resource IDs, ready-made SSH command
+├── main.tf                   wires the modules together
+├── outputs.tf                IPs, registry, DB connection string, SSH commands
 ├── terraform.tfvars.example  copy to terraform.tfvars and fill in
 └── modules/
-    ├── network/              VNet, subnet, NSG (+ subnet association)
-    └── compute/              public IP, NIC, Linux VM
+    ├── network/              VNet, public + private subnets, NAT gateway, NSGs
+    ├── compute/              one Ubuntu 24.04 VM (used for bastion and app VM)
+    ├── database/             Cosmos DB account, database, collection
+    └── registry/             Azure Container Registry
 ```
 
-Splitting network and compute into modules means each piece has a clear interface (its `variables.tf` and `outputs.tf`). The root module only connects them: the network module's `subnet_id` output becomes the compute module's `subnet_id` input.
+## One-time setup (subscription owner)
 
-## Prerequisites
+The team deploys with a service principal that is **Contributor on one resource group only**, so it cannot touch anything else in the subscription. The owner does this once:
 
-- Terraform 1.6 or newer (`terraform version`)
-- Azure CLI, logged in (`az login`)
-- An SSH key pair. If you don't have one:
-  ```bash
-  ssh-keygen -t rsa -b 4096 -f ~/.ssh/alu-devops -N ""
-  ```
+```bash
+az group create --name edushare-summative-rg --location southafricanorth
+az ad sp create-for-rbac --name edushare-summative-sp --role Contributor \
+  --scopes /subscriptions/<SUBSCRIPTION_ID>/resourceGroups/edushare-summative-rg
+
+# The service principal cannot register providers, so register these once:
+az provider register --namespace Microsoft.DocumentDB
+az provider register --namespace Microsoft.ContainerRegistry
+az provider register --namespace Microsoft.Network
+az provider register --namespace Microsoft.Compute
+az provider register --namespace Microsoft.Storage
+```
+
+Remote state lives in the storage account `edusharetfstate29373`, container `tfstate`, in the same resource group.
 
 ## Usage
 
 ```bash
+# 1. Log in as the service principal (values from the subscription owner)
+export ARM_CLIENT_ID=<appId>
+export ARM_CLIENT_SECRET=<password>
+export ARM_TENANT_ID=<tenant>
+export ARM_SUBSCRIPTION_ID=<subscription id>
+
+# 2. Fill in your settings
 cd terraform
+cp terraform.tfvars.example terraform.tfvars   # add your IP and public key
 
-# 1. Tell the Azure provider which subscription to use (never hardcoded)
-export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-
-# 2. Your settings: region, your IP, your public key
-cp terraform.tfvars.example terraform.tfvars
-curl -s ifconfig.me          # put this IP + /32 in allowed_ssh_cidrs
-
-# 3. Download the provider and set up the working folder
-terraform init
-
-# 4. Preview the changes (expect 8 to add on first run)
+# 3. Initialise with the shared remote state, then preview and apply
+terraform init -backend-config=backend.hcl
+terraform fmt -check -recursive
+terraform validate
 terraform plan -out=tfplan
-
-# 5. Create the infrastructure
 terraform apply tfplan
-
-# 6. See the outputs again at any time
-terraform output
-terraform output -raw vm_public_ip
 ```
 
-Log in to check the VM: `eval "$(terraform output -raw ssh_command)"`.
-
-When you are done, delete everything so it stops using credit:
+Read the outputs that Ansible and the CD pipeline need:
 
 ```bash
-terraform destroy
+terraform output                              # everything that is not secret
+terraform output -raw mongodb_connection_string   # secret: goes into Ansible Vault / GitHub secret
+terraform output -raw acr_admin_password          # secret
 ```
 
-## Inputs
+Tear everything down after grading: `terraform destroy`. The resource group and the state storage account stay, because they are not managed by this configuration.
 
-| Variable | Default | Description |
-|---|---|---|
-| `location` | (required) | Azure region, e.g. `southafricanorth` |
-| `allowed_ssh_cidrs` | (required) | IPs allowed to SSH, e.g. `["41.186.205.191/32"]`. `0.0.0.0/0` is rejected |
-| `project` | `edushare` | Prefix for all resource names |
-| `environment` | `dev` | `dev`, `staging` or `prod` |
-| `vm_size` | `Standard_B2als_v2` | VM size (2 vCPU, 4 GB RAM). B2s is blocked for student subscriptions in several regions |
-| `admin_username` | `azureuser` | Linux user Ansible connects as |
-| `ssh_public_key_paths` | `["~/.ssh/alu-devops.pub"]` | One public key per teammate |
-| `os_disk_size_gb` | `30` | 30 to 128 |
-| `vnet_address_space` | `["10.10.0.0/16"]` | VNet range |
-| `subnet_address_prefix` | `10.10.1.0/24` | Subnet range |
-| `app_port` | `80` | Public website port |
-| `tags` | `{}` | Extra tags for every resource |
+## Design decisions
 
-## Outputs
+- **Bastion as the only public entry point.** The app VM has no public IP. The bastion runs Nginx as a reverse proxy for the website and is the SSH jump host. This is cheaper than an Azure Load Balancer and Azure Bastion, and keeps a single, small attack surface.
+- **NSG rules as separate resources.** The CD pipeline adds a temporary SSH rule for its runner's IP and removes it after deploying. Separate rule resources mean Terraform never deletes a rule it does not own.
+- **Explicit deny inside the VNet.** Azure allows all VNet traffic by default; the private NSG overrides that so only the bastion can reach the app VM, and only on ports 22 and 4000.
+- **Private subnet with a NAT gateway.** The app VM gets outbound internet (packages, images) but nothing can connect in from outside.
+- **Cosmos DB for MongoDB.** A managed database that works with the existing Mongoose code; locked to the private subnet with a service endpoint (free) instead of a private endpoint (paid).
+- **Least-privilege deploy identity.** The service principal can only manage this resource group.
+- **Remote state.** Every teammate and the pipeline share one state file, so `terraform plan` shows the real infrastructure.
 
-| Output | Used for |
-|---|---|
-| `vm_public_ip` | Ansible inventory, browser |
-| `admin_username` | Ansible `ansible_user` |
-| `ssh_command` | Logging in by hand |
-| `app_url` | Opening the site after Ansible runs |
-| `resource_group_id`, `vnet_id`, `subnet_id`, `nsg_id`, `vm_id` | Referencing resources elsewhere (portal, CLI, other configs) |
-| `resource_group_name`, `vm_private_ip` | Azure CLI commands, debugging |
+## Accepted risks (Checkov)
 
-## Security choices
+| Check | Why it is accepted |
+|-------|--------------------|
+| `CKV_AZURE_119` public IP on a NIC | Only the bastion gets one; SSH is limited to team IPs |
+| `CKV_AZURE_160` port 80 open | It serves the public website |
+| `CKV_AZURE_137` ACR admin user | The service principal cannot create AcrPull role assignments; the credentials stay in GitHub secrets and Ansible Vault |
+| `CKV_AZURE_100/140/101` Cosmos DB | Microsoft-managed encryption keys; the Mongo API needs key auth; public endpoint is locked to the private subnet |
+| `CKV_AZURE_139/164/165/166/167/233/237` ACR | Premium-tier features; images are scanned by Trivy before they are pushed |
 
-- **No secrets in code.** The subscription ID comes from `ARM_SUBSCRIPTION_ID`; IPs live in the git-ignored `terraform.tfvars`.
-- **SSH locked down.** Port 22 is only open to the IPs in `allowed_ssh_cidrs`, and the validation rule rejects `0.0.0.0/0`.
-- **Keys only.** `disable_password_authentication = true`, with one public key per teammate. Nobody shares private keys.
-- **No VM extensions.** `allow_extension_operations = false`, since Ansible does the configuration.
-- **Deny by default.** Only ports 22 and 80 are opened. Everything else hits Azure's built-in `DenyAllInbound` rule. MongoDB (27017) is never exposed.
-- **State stays local and ignored.** `*.tfstate` holds resource details and is in `.gitignore`.
-
-## Evidence
-
-Deployed to `southafricanorth` on 7 Nov 2026.
-
-**`terraform plan`** on an empty subscription:
-
-```
-  # azurerm_resource_group.main will be created
-  # module.compute.azurerm_linux_virtual_machine.vm will be created
-  # module.compute.azurerm_network_interface.vm will be created
-  # module.compute.azurerm_public_ip.vm will be created
-  # module.network.azurerm_network_security_group.app will be created
-  # module.network.azurerm_subnet.app will be created
-  # module.network.azurerm_subnet_network_security_group_association.app will be created
-  # module.network.azurerm_virtual_network.main will be created
-Plan: 8 to add, 0 to change, 0 to destroy.
-```
-
-**`terraform output`** after apply (subscription ID replaced with `<sub>`):
-
-```
-admin_username      = "azureuser"
-app_url             = "http://20.164.222.7"
-resource_group_name = "edushare-dev-rg"
-ssh_command         = "ssh -i ~/.ssh/alu-devops azureuser@20.164.222.7"
-vm_private_ip       = "10.10.1.4"
-vm_public_ip        = "20.164.222.7"
-vm_id               = "/subscriptions/<sub>/resourceGroups/edushare-dev-rg/providers/Microsoft.Compute/virtualMachines/edushare-dev-vm"
-```
-
-**Checkov** (`checkov -d terraform --framework terraform`): 14 passed, 0 failed, 1 skipped (`CKV_AZURE_119`, documented accepted risk).
-
-**Screenshots:**
-
-| | |
-|---|---|
-| `terraform apply` complete | ![apply](docs/apply.png) |
-| SSH login to the VM | ![ssh](docs/ssh-login.png) |
-| Resource group in the Azure portal | ![portal](docs/portal.png) |
+Checkov: 49 passed, 0 failed, 15 skipped (each with a reason inline in the code).
 
 ## Troubleshooting
 
-| Error | Fix |
+| Problem | Fix |
 |---|---|
-| `SkuNotAvailable ... Capacity Restrictions` | That size is sold out in the region. Try another size, e.g. `-var vm_size=Standard_B2s_v2`. List what your subscription may use: `az vm list-skus -l southafricanorth --size Standard_B2 -o table` (rows with restrictions are blocked) |
-| `subscription ID could not be determined` | Run the `export ARM_SUBSCRIPTION_ID=...` line again (new terminals forget it) |
-| `Too many command line arguments` | zsh does not treat `#` as a comment. Don't paste the comments, or run `setopt interactivecomments` |
-| SSH times out | Your IP changed. Update `allowed_ssh_cidrs` and run `terraform apply` again |
-| `Currently selected workspace "..." does not exist` | An old `TF_WORKSPACE` variable is set: `unset TF_WORKSPACE TF_CLOUD_ORGANIZATION` |
+| `SkuNotAvailable` | Try another size: `az vm list-skus --location southafricanorth --size Standard_B -o table` |
+| `QuotaExceeded` (vCPUs) | The subscription allows 4 vCPUs here and each VM uses 2. Delete other VMs first |
+| `MissingSubscriptionRegistration` | The owner runs the `az provider register` commands above |
+| Free tier error on Cosmos DB | Only one free-tier account per subscription: set `cosmos_free_tier = false` |
+| Backend `403` | Check the `ARM_*` variables are set in this terminal |

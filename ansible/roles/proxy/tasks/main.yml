@@ -1,0 +1,42 @@
+---
+# Nginx on the bastion: the public entry point for the website.
+# It forwards every request to the app container on the private VM.
+
+- name: Install Nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Remove the default Nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Reload nginx
+
+- name: Write the EduShare reverse-proxy site
+  ansible.builtin.template:
+    src: edushare.conf.j2
+    dest: /etc/nginx/sites-available/edushare.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nginx
+
+- name: Enable the EduShare site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/edushare.conf
+    dest: /etc/nginx/sites-enabled/edushare.conf
+    state: link
+  notify: Reload nginx
+
+- name: Check the Nginx configuration is valid
+  ansible.builtin.command: nginx -t
+  changed_when: false
+
+- name: Start Nginx now and on every boot
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true

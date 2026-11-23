@@ -1,0 +1,155 @@
+name: CD - Deploy to Production
+
+# Runs only when code reaches main (a merged pull request), or by hand from the
+# Actions tab to redeploy. Every stage must pass before the next one starts:
+#
+#   CI (lint, test, build) ─┐
+#                           ├─▶ build + push image to ACR ─▶ deploy with Ansible ─▶ smoke test
+#   Security scans ─────────┘
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never run two deploys at the same time; a new one waits for the running one.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# Non-secret values from `terraform output` (terraform/outputs.tf).
+env:
+  RESOURCE_GROUP: edushare-summative-rg
+  ACR_NAME: edushareacrgvv9o
+  ACR_LOGIN_SERVER: edushareacrgvv9o.azurecr.io
+  IMAGE_NAME: edushare
+  BASTION_NSG: edushare-prod-public-nsg
+  BASTION_IP: 102.37.10.231
+
+jobs:
+  # 1. The same checks every pull request runs.
+  ci:
+    name: CI checks
+    uses: ./.github/workflows/ci.yml
+
+  # 2. The same security scans every pull request runs (secrets, dependencies, IaC, image).
+  security:
+    name: Security scans
+    uses: ./.github/workflows/security.yml
+    secrets: inherit
+
+  # 3. Build the release image once and push it to the private registry (ACR).
+  build-push:
+    name: Build and push image to ACR
+    runs-on: ubuntu-latest
+    needs: [ci, security]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # The service principal is Contributor on the project's resource group only.
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+
+      - name: Log in to the container registry
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Two tags: the commit SHA (what gets deployed, so every release is
+      # traceable and can be rolled back) and "latest" for convenience.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # 4. Deploy that exact image to the private app VM with the Ansible playbook.
+  deploy:
+    name: Deploy with Ansible
+    runs-on: ubuntu-latest
+    needs: build-push
+    environment:
+      name: production
+      url: http://102.37.10.231
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: '{"clientId":"${{ secrets.AZURE_CLIENT_ID }}","clientSecret":"${{ secrets.AZURE_CLIENT_SECRET }}","subscriptionId":"${{ secrets.AZURE_SUBSCRIPTION_ID }}","tenantId":"${{ secrets.AZURE_TENANT_ID }}"}'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible and its collections
+        run: |
+          pip install --quiet ansible-core
+          ansible-galaxy collection install -r ansible/requirements.yml
+
+      # Secrets go to files that only this job can read, and are deleted at the end.
+      - name: Write the deploy key and vault password
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          ANSIBLE_VAULT_PASSWORD: ${{ secrets.ANSIBLE_VAULT_PASSWORD }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/edushare-cd
+          chmod 600 ~/.ssh/edushare-cd
+          printf '%s' "$ANSIBLE_VAULT_PASSWORD" > "$RUNNER_TEMP/vault_pass"
+          chmod 600 "$RUNNER_TEMP/vault_pass"
+
+      # SSH to the bastion is closed to the internet. Open it for this runner's
+      # IP only, for the length of the deploy; the last step always closes it.
+      - name: Open SSH on the bastion for this runner
+        run: |
+          RUNNER_IP=$(curl -fsS https://api.ipify.org)
+          echo "Runner IP: $RUNNER_IP"
+          az network nsg rule create \
+            --resource-group "$RESOURCE_GROUP" --nsg-name "$BASTION_NSG" \
+            --name "cd-runner-${{ github.run_id }}" --priority 150 \
+            --direction Inbound --access Allow --protocol Tcp \
+            --source-address-prefixes "$RUNNER_IP/32" --destination-port-ranges 22 \
+            --output none
+          sleep 15
+
+      # The playbook pulls the new image from ACR on the private VM through the
+      # bastion, restarts the container and checks /health end to end.
+      - name: Run the Ansible playbook
+        working-directory: ansible
+        env:
+          ANSIBLE_FORCE_COLOR: "1"
+        run: |
+          export EDUSHARE_SSH_KEY="$HOME/.ssh/edushare-cd"
+          ansible-playbook playbook.yml \
+            --vault-password-file "$RUNNER_TEMP/vault_pass" \
+            -e app_image_tag=${{ github.sha }}
+
+      - name: Smoke test the live site
+        run: |
+          curl -fsS --retry 10 --retry-delay 6 --retry-all-errors "http://$BASTION_IP/health"
+          echo
+          echo "Deployed ${{ github.sha }} to http://$BASTION_IP"
+
+      - name: Close SSH on the bastion
+        if: always()
+        run: |
+          az network nsg rule delete \
+            --resource-group "$RESOURCE_GROUP" --nsg-name "$BASTION_NSG" \
+            --name "cd-runner-${{ github.run_id }}" --output none || true
+          rm -f ~/.ssh/edushare-cd "$RUNNER_TEMP/vault_pass"
